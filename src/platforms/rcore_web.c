@@ -74,6 +74,7 @@
 typedef struct {
     GLFWwindow *handle;                 // GLFW window handle (graphic device)
     bool ourFullscreen;                 // Internal var to filter our handling of fullscreen vs the user handling of fullscreen
+    bool isHighDPIAware;
 } PlatformData;
 
 //----------------------------------------------------------------------------------
@@ -134,6 +135,15 @@ static EM_BOOL EmscriptenMouseCallback(int eventType, const EmscriptenMouseEvent
 static EM_BOOL EmscriptenPointerlockCallback(int eventType, const EmscriptenPointerlockChangeEvent *pointerlockChangeEvent, void *userData);
 static EM_BOOL EmscriptenTouchCallback(int eventType, const EmscriptenTouchEvent *touchEvent, void *userData);
 static EM_BOOL EmscriptenGamepadCallback(int eventType, const EmscriptenGamepadEvent *gamepadEvent, void *userData);
+
+static bool IsHighDPIAware();
+static float GetDevicePixelRatio();
+static void InstallModuleJSAPI();
+static void AdjustWindowSize(int width, int height, int fbWidth, int fbHeight);
+static void AdjustFrameBufferSize(int fbWidth, int fbHeight);
+
+void SetHighDPIAware(bool flag);
+void FullscreenCallback(bool isFullscreen);
 
 //----------------------------------------------------------------------------------
 // Module Functions Declaration
@@ -627,7 +637,8 @@ void SetWindowMaxSize(int width, int height)
 // Set window dimensions
 void SetWindowSize(int width, int height)
 {
-    glfwSetWindowSize(platform.handle, width, height);
+//    glfwSetWindowSize(platform.handle, width, height);
+    WindowSizeCallback(platform.handle, width, height);
 }
 
 // Set window opacity, value opacity is between 0.0 and 1.0
@@ -1044,14 +1055,19 @@ int InitPlatform(void)
 
     // Scale content area based on the monitor content scale where window is placed on
     // NOTE: This feature requires emscripten 3.1.51
-    //if ((CORE.Window.flags & FLAG_WINDOW_HIGHDPI) > 0) glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
-    //else glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);
+    if ((CORE.Window.flags & FLAG_WINDOW_HIGHDPI) > 0) glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
+    else glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);
 
     if (CORE.Window.flags & FLAG_MSAA_4X_HINT)
     {
         // NOTE: MSAA is only enabled for main framebuffer, not user-created FBOs
         TRACELOG(LOG_INFO, "DISPLAY: Trying to enable MSAA x4");
         glfwWindowHint(GLFW_SAMPLES, 4); // Tries to enable multisampling x4 (MSAA), default is 0
+    }
+
+    if (CORE.Window.flags & FLAG_WINDOW_HIGHDPI)
+    {
+        platform.isHighDPIAware = true;
     }
 
     // NOTE: When asking for an OpenGL context version, most drivers provide the highest supported version
@@ -1201,18 +1217,15 @@ int InitPlatform(void)
     glfwMakeContextCurrent(platform.handle);
     result = true; // TODO: WARNING: glfwGetError(NULL); symbol can not be found in Web
 
+    InstallModuleJSAPI();
+
     // Check context activation
     if (result == true) //(result != GLFW_NO_WINDOW_CONTEXT) && (result != GLFW_PLATFORM_ERROR))
     {
         CORE.Window.ready = true;
 
-        int fbWidth = CORE.Window.screen.width;
-        int fbHeight = CORE.Window.screen.height;
-
-        CORE.Window.render.width = fbWidth;
-        CORE.Window.render.height = fbHeight;
-        CORE.Window.currentFbo.width = fbWidth;
-        CORE.Window.currentFbo.height = fbHeight;
+        AdjustFrameBufferSize((int) CORE.Window.screen.width, (int) CORE.Window.screen.height);
+        emscripten_set_element_css_size("#canvas", CORE.Window.screen.width, CORE.Window.screen.height);
 
         TRACELOG(LOG_INFO, "DISPLAY: Device initialized successfully");
         TRACELOG(LOG_INFO, "    > Display size: %i x %i", CORE.Window.display.width, CORE.Window.display.height);
@@ -1297,34 +1310,57 @@ static void ErrorCallback(int error, const char *description)
     TRACELOG(LOG_WARNING, "GLFW: Error: %i Description: %s", error, description);
 }
 
+// AdjustWindowSize
+static void AdjustWindowSize(int width, int height, int fbWidth, int fbHeight)
+{
+    TRACELOG(LOG_INFO, "AdjustWindowSize: %dx%d | %dx%d", width, height, fbWidth, fbHeight);
+    CORE.Window.screen.width = width;
+    CORE.Window.screen.height = height;
+
+    AdjustFrameBufferSize(width, height);
+
+    emscripten_set_element_css_size("#canvas", width, height);
+
+    EM_ASM({
+               GLFW.active.width = $0;
+               GLFW.active.height = $1;
+           },
+           width, height
+    );
+}
+
+// AdjustFrameBufferSize
+static void AdjustFrameBufferSize(int fbWidth, int fbHeight)
+{
+    TRACELOG(LOG_INFO, "AdjustFrameBufferSize: %dx%d", fbWidth, fbHeight);
+
+    float scale = GetDevicePixelRatio();
+    fbWidth = (int) ((float) fbWidth * scale);
+    fbHeight = (int) ((float) fbHeight * scale);
+
+    // Screen scaling matrix is required in case desired screen area is different from display area
+    CORE.Window.screenScale = MatrixScale((float) fbWidth / (float) CORE.Window.screen.width,
+                                          (float) fbHeight / (float) CORE.Window.screen.height, 1.0f);
+
+    SetMouseScale(1.0f / scale, 1.0f / scale);
+
+    CORE.Window.render.width = fbWidth;
+    CORE.Window.render.height = fbHeight;
+    CORE.Window.currentFbo.width = fbWidth;
+    CORE.Window.currentFbo.height = fbHeight;
+    CORE.Window.resizedLastFrame = true;
+
+    emscripten_set_canvas_element_size("#canvas", fbWidth, fbHeight);
+
+    SetupViewport(fbWidth, fbHeight);
+}
+
 // GLFW3 WindowSize Callback, runs when window is resizedLastFrame
 // NOTE: Window resizing not allowed by default
 static void WindowSizeCallback(GLFWwindow *window, int width, int height)
 {
-    // Reset viewport and projection matrix for new size
-    SetupViewport(width, height);
-
-    CORE.Window.currentFbo.width = width;
-    CORE.Window.currentFbo.height = height;
-    CORE.Window.resizedLastFrame = true;
-
-    if (IsWindowFullscreen()) return;
-
-    // Set current screen size
-    if ((CORE.Window.flags & FLAG_WINDOW_HIGHDPI) > 0)
-    {
-        Vector2 windowScaleDPI = GetWindowScaleDPI();
-
-        CORE.Window.screen.width = (unsigned int)(width/windowScaleDPI.x);
-        CORE.Window.screen.height = (unsigned int)(height/windowScaleDPI.y);
-    }
-    else
-    {
-        CORE.Window.screen.width = width;
-        CORE.Window.screen.height = height;
-    }
-
-    // NOTE: Postprocessing texture is not scaled to new size
+    TRACELOG(LOG_INFO, "WindowSizeCallback: %dx%d", width, height);
+    AdjustWindowSize(width, height, width, height);
 }
 
 // GLFW3 WindowIconify Callback, runs when window is minimized/restored
@@ -1549,23 +1585,9 @@ static EM_BOOL EmscriptenResizeCallback(int eventType, const EmscriptenUiEvent *
     if (height < CORE.Window.screenMin.height) height = CORE.Window.screenMin.height;
     else if (height > CORE.Window.screenMax.height && CORE.Window.screenMax.height > 0) height = CORE.Window.screenMax.height;
 
-    emscripten_set_canvas_element_size("#canvas", width, height);
+    SetWindowSize(width, height);
 
-    SetupViewport(width, height); // Reset viewport and projection matrix for new size
-
-    CORE.Window.currentFbo.width = width;
-    CORE.Window.currentFbo.height = height;
-    CORE.Window.resizedLastFrame = true;
-
-    if (IsWindowFullscreen()) return 1;
-
-    // Set current screen size
-    CORE.Window.screen.width = width;
-    CORE.Window.screen.height = height;
-
-    // NOTE: Postprocessing texture is not scaled to new size
-
-    return 0;
+    return 1; // The event was consumed by the callback handler
 }
 
 // Register mouse input events
@@ -1664,6 +1686,93 @@ static EM_BOOL EmscriptenTouchCallback(int eventType, const EmscriptenTouchEvent
 #endif
 
     return 1; // The event was consumed by the callback handler
+}
+
+// InstallModuleJSAPI
+void InstallModuleJSAPI()
+{
+    EM_ASM(
+        {
+            Module.raylib = {}; // used to store width/height before fullscreen
+            const cb = Module.requestFullscreen;
+            Module.requestFullscreen = (pointerLock, resize) => {
+                const canvas = document.getElementById('canvas');
+                Module.raylib.screenWidth = canvas.clientWidth;
+                Module.raylib.screenHeight = canvas.clientHeight;
+                cb(pointerLock, $0);
+            };
+            Module.onFullscreen = Module.cwrap('FullscreenCallback', null, ['boolean']); // called by emscripten
+            Module.setHighDPIAware = Module.cwrap('SetHighDPIAware', null, ['boolean']);
+        },
+        (CORE.Window.flags & FLAG_WINDOW_RESIZABLE) != 0
+    );
+}
+
+// FullscreenCallback
+void FullscreenCallback(bool isFullscreen)
+{
+    TRACELOG(LOG_INFO, "FullscreenCallback(%s)", isFullscreen ? "true" : "false");
+    if(isFullscreen)
+    {
+        if((CORE.Window.flags & FLAG_WINDOW_RESIZABLE) == 0)
+        {
+            if(IsHighDPIAware())
+            {
+                int screenWidth, screenHeight;
+                emscripten_get_screen_size(&screenWidth, &screenHeight);
+                AdjustFrameBufferSize(screenWidth, screenWidth);
+            }
+        }
+        else
+        {
+            int screenWidth, screenHeight;
+            emscripten_get_screen_size(&screenWidth, &screenHeight);
+            TRACELOG(LOG_INFO, "fullscreen resizable %dx%d", screenWidth, screenHeight);
+            SetWindowSize(screenWidth, screenHeight);
+        }
+    }
+    else
+    {
+        SetWindowSize(EM_ASM_INT(return Module.raylib.screenWidth;), EM_ASM_INT(return Module.raylib.screenHeight;));
+    }
+
+    CORE.Window.fullscreen = isFullscreen;
+}
+
+// SetHighDPIAware
+void SetHighDPIAware(bool flag)
+{
+    TRACELOG(LOG_INFO, "SetHighDPIAware(%s)", flag ? "true" : "false");
+    if(platform.isHighDPIAware != flag)
+    {
+        platform.isHighDPIAware = flag;
+        if(CORE.Window.fullscreen)
+        {
+            int screenWidth, screenHeight;
+            emscripten_get_screen_size(&screenWidth, &screenHeight);
+            AdjustFrameBufferSize(screenWidth, screenWidth);
+        }
+        else
+            SetWindowSize(GetScreenWidth(), GetScreenHeight());
+    }
+}
+
+// IsHighDPIAware
+static bool IsHighDPIAware()
+{
+    return platform.isHighDPIAware;
+}
+
+// GetDevicePixelRatio
+static float GetDevicePixelRatio()
+{
+    if(IsHighDPIAware())
+        return (float) EM_ASM_DOUBLE({
+                                         console.log("dpr: " + devicePixelRatio);
+                                         return (typeof devicePixelRatio == 'number' && devicePixelRatio) || 1.0;
+                                     });
+    else
+        return 1.0f;
 }
 
 // EOF
