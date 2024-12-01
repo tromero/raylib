@@ -1457,11 +1457,6 @@ static void WindowContentScaleCallback(GLFWwindow *window, float scalex, float s
     CORE.Window.screenScale = MatrixScale(scalex, scaley, 1.0f);
 }
 
-static void WindowContentScaleCallback(GLFWwindow *window, float scalex, float scaley)
-{
-    CORE.Window.screenScale = MatrixScale(scalex, scaley, 1.0f);
-}
-
 // GLFW3 WindowIconify Callback, runs when window is minimized/restored
 static void WindowIconifyCallback(GLFWwindow *window, int iconified)
 {
