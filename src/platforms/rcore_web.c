@@ -1322,8 +1322,6 @@ int InitPlatform(void)
     glfwMakeContextCurrent(platform.handle);
     result = true; // TODO: WARNING: glfwGetError(NULL); symbol can not be found in Web
 
-    InstallModuleJSAPI();
-
     // Check context activation
     if (result == true) //(result != GLFW_NO_WINDOW_CONTEXT) && (result != GLFW_PLATFORM_ERROR))
     {
@@ -1421,15 +1419,6 @@ static void ErrorCallback(int error, const char *description)
     TRACELOG(LOG_WARNING, "GLFW: Error: %i Description: %s", error, description);
 }
 
-// AdjustWindowSize
-static void AdjustWindowSize(int width, int height, int fbWidth, int fbHeight)
-{
-    TRACELOG(LOG_INFO, "WindowSizeCallback: %dx%d", width, height);
-    SetWindowSize(width, height);
-
-    // NOTE: Postprocessing texture is not scaled to new size
-}
-
 // AdjustFrameBufferSize
 static void AdjustFrameBufferSize(int fbWidth, int fbHeight)
 {
@@ -1456,6 +1445,13 @@ static void AdjustFrameBufferSize(int fbWidth, int fbHeight)
 
     // Reset viewport and projection matrix for new size
     SetupViewport(fbWidth, fbHeight);
+}
+
+// GLFW3 WindowSize Callback, runs when window is resizedLastFrame
+// NOTE: Window resizing not allowed by default
+static void WindowSizeCallback(GLFWwindow *window, int width, int height)
+{
+    SetWindowSize(width, height);
 }
 
 static void WindowContentScaleCallback(GLFWwindow *window, float scalex, float scaley)
