@@ -144,12 +144,7 @@ static EM_BOOL EmscriptenGamepadCallback(int eventType, const EmscriptenGamepadE
 
 static bool IsHighDPIAware();
 static float GetDevicePixelRatio();
-static void InstallModuleJSAPI();
-static void AdjustWindowSize(int width, int height, int fbWidth, int fbHeight);
 static void AdjustFrameBufferSize(int fbWidth, int fbHeight);
-
-void SetHighDPIAware(bool flag);
-void FullscreenCallback(bool isFullscreen);
 
 //----------------------------------------------------------------------------------
 // Module Functions Declaration
@@ -598,12 +593,6 @@ void ClearWindowState(unsigned int flags)
         TRACELOG(LOG_WARNING, "ClearWindowState(FLAG_WINDOW_TRANSPARENT) not available on target platform");
     }
 
-    // State change: FLAG_WINDOW_HIGHDPI
-    if ((flags & FLAG_WINDOW_HIGHDPI) > 0)
-    {
-        TRACELOG(LOG_WARNING, "ClearWindowState(FLAG_WINDOW_HIGHDPI) not available on target platform");
-    }
-
     // State change: FLAG_WINDOW_MOUSE_PASSTHROUGH
     if ((flags & FLAG_WINDOW_MOUSE_PASSTHROUGH) > 0)
     {
@@ -677,8 +666,25 @@ void SetWindowMaxSize(int width, int height)
 // Set window dimensions
 void SetWindowSize(int width, int height)
 {
-//    glfwSetWindowSize(platform.handle, width, height);
-    WindowSizeCallback(platform.handle, width, height);
+    // Set visual display dimensions
+    emscripten_set_element_css_size("#canvas", width, height);
+
+    if (!IsWindowFullscreen())
+    {
+        // Set current screen size
+        CORE.Window.screen.width = width;
+        CORE.Window.screen.height = height;
+    }
+
+    float scale = GetDevicePixelRatio();
+    int fbWidth = (int) ((float) width * scale);
+    int fbHeight = (int) ((float) height * scale);
+    AdjustFrameBufferSize(fbWidth, fbHeight);
+
+    // SetupViewport(width, height); // Reset viewport and projection matrix for new size
+
+    CORE.Window.resizedLastFrame = true;
+
 }
 
 // Set window opacity, value opacity is between 0.0 and 1.0
@@ -1310,8 +1316,11 @@ int InitPlatform(void)
     {
         CORE.Window.ready = true;
 
-        AdjustFrameBufferSize((int) CORE.Window.screen.width, (int) CORE.Window.screen.height);
-        emscripten_set_element_css_size("#canvas", CORE.Window.screen.width, CORE.Window.screen.height);
+        SetWindowSize( (int) CORE.Window.screen.width, (int) CORE.Window.screen.height);
+        // AdjustFrameBufferSize((int) CORE.Window.screen.width, (int) CORE.Window.screen.height);
+
+        // // Sets the display size of the canvas element without affecting framebuffer size
+        // emscripten_set_element_css_size("#canvas", (int) CORE.Window.screen.width, (int) CORE.Window.screen.height);
 
         TRACELOG(LOG_INFO, "DISPLAY: Device initialized successfully");
         TRACELOG(LOG_INFO, "    > Display size: %i x %i", CORE.Window.display.width, CORE.Window.display.height);
@@ -1402,20 +1411,10 @@ static void ErrorCallback(int error, const char *description)
 // AdjustWindowSize
 static void AdjustWindowSize(int width, int height, int fbWidth, int fbHeight)
 {
-    TRACELOG(LOG_INFO, "AdjustWindowSize: %dx%d | %dx%d", width, height, fbWidth, fbHeight);
-    CORE.Window.screen.width = width;
-    CORE.Window.screen.height = height;
+    TRACELOG(LOG_INFO, "WindowSizeCallback: %dx%d", width, height);
+    SetWindowSize(width, height);
 
-    AdjustFrameBufferSize(width, height);
-
-    emscripten_set_element_css_size("#canvas", width, height);
-
-    EM_ASM({
-               GLFW.active.width = $0;
-               GLFW.active.height = $1;
-           },
-           width, height
-    );
+    // NOTE: Postprocessing texture is not scaled to new size
 }
 
 // AdjustFrameBufferSize
@@ -1424,8 +1423,8 @@ static void AdjustFrameBufferSize(int fbWidth, int fbHeight)
     TRACELOG(LOG_INFO, "AdjustFrameBufferSize: %dx%d", fbWidth, fbHeight);
 
     float scale = GetDevicePixelRatio();
-    fbWidth = (int) ((float) fbWidth * scale);
-    fbHeight = (int) ((float) fbHeight * scale);
+    // fbWidth = (int) ((float) fbWidth * scale);
+    // fbHeight = (int) ((float) fbHeight * scale);
 
     // Screen scaling matrix is required in case desired screen area is different from display area
     CORE.Window.screenScale = MatrixScale((float) fbWidth / (float) CORE.Window.screen.width,
@@ -1439,17 +1438,11 @@ static void AdjustFrameBufferSize(int fbWidth, int fbHeight)
     CORE.Window.currentFbo.height = fbHeight;
     CORE.Window.resizedLastFrame = true;
 
+    // this resizes the framebuffer by setting width and height on the canvas element but does not change the display size of the canvas element.
     emscripten_set_canvas_element_size("#canvas", fbWidth, fbHeight);
 
+    // Reset viewport and projection matrix for new size
     SetupViewport(fbWidth, fbHeight);
-}
-
-// GLFW3 WindowSize Callback, runs when window is resizedLastFrame
-// NOTE: Window resizing not allowed by default
-static void WindowSizeCallback(GLFWwindow *window, int width, int height)
-{
-    TRACELOG(LOG_INFO, "WindowSizeCallback: %dx%d", width, height);
-    AdjustWindowSize(width, height, width, height);
 }
 
 static void WindowContentScaleCallback(GLFWwindow *window, float scalex, float scaley)
@@ -1664,6 +1657,9 @@ static EM_BOOL EmscriptenFullscreenChangeCallback(int eventType, const Emscripte
         }
     }
 
+    // todo tromero:
+    // SetWindowSize(???,???);
+
     return 1; // The event was consumed by the callback handler
 }
 
@@ -1693,6 +1689,8 @@ static EM_BOOL EmscriptenResizeCallback(int eventType, const EmscriptenUiEvent *
     else if (height > (int)CORE.Window.screenMax.height && CORE.Window.screenMax.height > 0) height = CORE.Window.screenMax.height;
 
     SetWindowSize(width, height);
+
+    // NOTE: Postprocessing texture is not scaled to new size
 
     return 1; // The event was consumed by the callback handler
 }
@@ -1809,75 +1807,6 @@ static EM_BOOL EmscriptenTouchCallback(int eventType, const EmscriptenTouchEvent
     }
 
     return 1; // The event was consumed by the callback handler
-}
-
-// InstallModuleJSAPI
-void InstallModuleJSAPI()
-{
-    EM_ASM(
-        {
-            Module.raylib = {}; // used to store width/height before fullscreen
-            const cb = Module.requestFullscreen;
-            Module.requestFullscreen = (pointerLock, resize) => {
-                const canvas = document.getElementById('canvas');
-                Module.raylib.screenWidth = canvas.clientWidth;
-                Module.raylib.screenHeight = canvas.clientHeight;
-                cb(pointerLock, $0);
-            };
-            Module.onFullscreen = Module.cwrap('FullscreenCallback', null, ['boolean']); // called by emscripten
-            Module.setHighDPIAware = Module.cwrap('SetHighDPIAware', null, ['boolean']);
-        },
-        (CORE.Window.flags & FLAG_WINDOW_RESIZABLE) != 0
-    );
-}
-
-// FullscreenCallback
-void FullscreenCallback(bool isFullscreen)
-{
-    TRACELOG(LOG_INFO, "FullscreenCallback(%s)", isFullscreen ? "true" : "false");
-    if(isFullscreen)
-    {
-        if((CORE.Window.flags & FLAG_WINDOW_RESIZABLE) == 0)
-        {
-            if(IsHighDPIAware())
-            {
-                int screenWidth, screenHeight;
-                emscripten_get_screen_size(&screenWidth, &screenHeight);
-                AdjustFrameBufferSize(screenWidth, screenWidth);
-            }
-        }
-        else
-        {
-            int screenWidth, screenHeight;
-            emscripten_get_screen_size(&screenWidth, &screenHeight);
-            TRACELOG(LOG_INFO, "fullscreen resizable %dx%d", screenWidth, screenHeight);
-            SetWindowSize(screenWidth, screenHeight);
-        }
-    }
-    else
-    {
-        SetWindowSize(EM_ASM_INT(return Module.raylib.screenWidth;), EM_ASM_INT(return Module.raylib.screenHeight;));
-    }
-
-    CORE.Window.fullscreen = isFullscreen;
-}
-
-// SetHighDPIAware
-void SetHighDPIAware(bool flag)
-{
-    TRACELOG(LOG_INFO, "SetHighDPIAware(%s)", flag ? "true" : "false");
-    if(platform.isHighDPIAware != flag)
-    {
-        platform.isHighDPIAware = flag;
-        if(CORE.Window.fullscreen)
-        {
-            int screenWidth, screenHeight;
-            emscripten_get_screen_size(&screenWidth, &screenHeight);
-            AdjustFrameBufferSize(screenWidth, screenWidth);
-        }
-        else
-            SetWindowSize(GetScreenWidth(), GetScreenHeight());
-    }
 }
 
 // IsHighDPIAware
